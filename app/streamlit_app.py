@@ -8,6 +8,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from dotenv import load_dotenv
+from datetime import datetime
 import os
 import sys
 
@@ -142,145 +143,151 @@ if run_analysis:
     elif not tickers:
         st.error("⚠️ Please enter at least one ticker")
     else:
-        with st.spinner("Fetching data and running analysis..."):
-            try:
-                # Step 1: Fetch macro data
-                st.toast("Fetching FRED macro data...")
-                macro_df = get_macro_series(
-                    start_date=start_date.strftime("%Y-%m-%d"),
-                    api_key=fred_api_key
-                )
-                
-                # Step 2: Fetch market data
-                st.toast("Fetching market prices...")
-                prices_df = get_price_data(
-                    tickers=tickers,
-                    start_date=start_date.strftime("%Y-%m-%d")
-                )
-                
-                # Step 3: Create features
-                st.toast("Building risk factors...")
-                risk_factors = make_features(macro_df, prices_df)
-                
-                # Step 4: Fit factor model
-                st.toast("Fitting factor model...")
-                betas_df = fit_factor_model(risk_factors)
-                
-                # Step 5: Run stress test
-                st.toast("Running stress test...")
-                # Equal weights for simplicity
-                stress_results = stress_portfolio(
-                    betas_df=betas_df,
-                    scenario_name=scenario_name,
-                    notional_value=notional_value
-                )
-                
-                # Get summary
-                summary = get_portfolio_summary(stress_results, scenario_name)
-                
-                # ================== TOP METRICS ==================
-                st.header("📊 Stress Test Results")
-                
-                metric_col1, metric_col2, metric_col3 = st.columns(3)
-                
-                with metric_col1:
-                    # Calculate P&L and Percentage Return
-                    pnl = summary['total_loss']  # This is already the P&L (negative = loss)
-                    stressed_return = (pnl / notional_value) * 100
+        # Calculate months of data available
+        months_diff = (datetime.now().year - start_date.year) * 12 + datetime.now().month - start_date.month
+        
+        if months_diff < 24:
+            st.error("⚠️ Data Error: Please select a Start Date at least 2 years in the past. The model needs historical data to calculate correlations (Betas).")
+        else:
+            with st.spinner("Fetching data and running analysis..."):
+                try:
+                    # Step 1: Fetch macro data
+                    st.toast("Fetching FRED macro data...")
+                    macro_df = get_macro_series(
+                        start_date=start_date.strftime("%Y-%m-%d"),
+                        api_key=fred_api_key
+                    )
                     
-                    # Determine color logic: Normal means Positive=Green, Negative=Red
-                    # Label as "Projected P&L" so negative numbers make sense
-                    st.metric(
-                        label="Projected P&L",
-                        value=f"${pnl:,.0f}",          # This will show "-$111,010" for losses
-                        delta=f"{stressed_return:.2f}%",  # This will show "-11.1%"
-                        delta_color="normal"           # FORCE: Green for up, Red for down
+                    # Step 2: Fetch market data
+                    st.toast("Fetching market prices...")
+                    prices_df = get_price_data(
+                        tickers=tickers,
+                        start_date=start_date.strftime("%Y-%m-%d")
                     )
-                
-                with metric_col2:
-                    st.metric(
-                        "Portfolio VaR",
-                        f"{abs(summary['portfolio_var_pct']):.2f}%",
-                        delta="At Risk"
+                    
+                    # Step 3: Create features
+                    st.toast("Building risk factors...")
+                    risk_factors = make_features(macro_df, prices_df)
+                    
+                    # Step 4: Fit factor model
+                    st.toast("Fitting factor model...")
+                    betas_df = fit_factor_model(risk_factors)
+                    
+                    # Step 5: Run stress test
+                    st.toast("Running stress test...")
+                    # Equal weights for simplicity
+                    stress_results = stress_portfolio(
+                        betas_df=betas_df,
+                        scenario_name=scenario_name,
+                        notional_value=notional_value
                     )
-                
-                with metric_col3:
-                    st.metric(
-                        "Worst Performer",
-                        summary['worst_performer'],
-                        delta=f"{summary['worst_return']*100:.1f}%",
-                        delta_color="normal"  # Red for negative, Green for positive
+                    
+                    # Get summary
+                    summary = get_portfolio_summary(stress_results, scenario_name)
+                    
+                    # ================== TOP METRICS ==================
+                    st.header("📊 Stress Test Results")
+                    
+                    metric_col1, metric_col2, metric_col3 = st.columns(3)
+                    
+                    with metric_col1:
+                        # Calculate P&L and Percentage Return
+                        pnl = summary['total_loss']  # This is already the P&L (negative = loss)
+                        stressed_return = (pnl / notional_value) * 100
+                        
+                        # Determine color logic: Normal means Positive=Green, Negative=Red
+                        # Label as "Projected P&L" so negative numbers make sense
+                        st.metric(
+                            label="Projected P&L",
+                            value=f"${pnl:,.0f}",          # This will show "-$111,010" for losses
+                            delta=f"{stressed_return:.2f}%",  # This will show "-11.1%"
+                            delta_color="normal"           # FORCE: Green for up, Red for down
+                        )
+                    
+                    with metric_col2:
+                        st.metric(
+                            "Portfolio VaR",
+                            f"{abs(summary['portfolio_var_pct']):.2f}%",
+                            delta="At Risk"
+                        )
+                    
+                    with metric_col3:
+                        st.metric(
+                            "Worst Performer",
+                            summary['worst_performer'],
+                            delta=f"{summary['worst_return']*100:.1f}%",
+                            delta_color="normal"  # Red for negative, Green for positive
+                        )
+                    
+                    # ================== WATERFALL CHART ==================
+                    st.subheader("🌊 Factor Contribution Analysis")
+                    
+                    factor_contrib = get_factor_contributions(stress_results)
+                    
+                    # Create waterfall chart
+                    fig = go.Figure(go.Waterfall(
+                        name="Factor Contributions",
+                        orientation="v",
+                        measure=["relative"] * len(factor_contrib) + ["total"],
+                        x=factor_contrib['factor'].tolist() + ["Total"],
+                        y=factor_contrib['dollar_contribution'].tolist() + [summary['total_loss']],
+                        connector={"line": {"color": "rgb(63, 63, 63)"}},
+                        decreasing={"marker": {"color": "#ef4444"}},
+                        increasing={"marker": {"color": "#22c55e"}},
+                        totals={"marker": {"color": "#3b82f6"}},
+                        text=[f"${v:,.0f}" for v in factor_contrib['dollar_contribution']] + [f"${summary['total_loss']:,.0f}"],
+                        textposition="outside"
+                    ))
+                    
+                    fig.update_layout(
+                        title="Which Macro Factors Are Driving Your Portfolio Loss?",
+                        showlegend=False,
+                        height=400,
+                        yaxis_title="Dollar Impact ($)",
+                        xaxis_title="Macro Factor"
                     )
-                
-                # ================== WATERFALL CHART ==================
-                st.subheader("🌊 Factor Contribution Analysis")
-                
-                factor_contrib = get_factor_contributions(stress_results)
-                
-                # Create waterfall chart
-                fig = go.Figure(go.Waterfall(
-                    name="Factor Contributions",
-                    orientation="v",
-                    measure=["relative"] * len(factor_contrib) + ["total"],
-                    x=factor_contrib['factor'].tolist() + ["Total"],
-                    y=factor_contrib['dollar_contribution'].tolist() + [summary['total_loss']],
-                    connector={"line": {"color": "rgb(63, 63, 63)"}},
-                    decreasing={"marker": {"color": "#ef4444"}},
-                    increasing={"marker": {"color": "#22c55e"}},
-                    totals={"marker": {"color": "#3b82f6"}},
-                    text=[f"${v:,.0f}" for v in factor_contrib['dollar_contribution']] + [f"${summary['total_loss']:,.0f}"],
-                    textposition="outside"
-                ))
-                
-                fig.update_layout(
-                    title="Which Macro Factors Are Driving Your Portfolio Loss?",
-                    showlegend=False,
-                    height=400,
-                    yaxis_title="Dollar Impact ($)",
-                    xaxis_title="Macro Factor"
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # ================== BETAS TABLE ==================
-                st.subheader("📈 Factor Betas by Stock")
-                st.caption("These coefficients show each stock's sensitivity to macro factors")
-                
-                # Format betas table
-                display_df = model_summary(betas_df).copy()
-                
-                # Rename columns for display
-                column_rename = {
-                    'ticker': 'Ticker',
-                    'beta_SPY': 'Market β',
-                    'beta_DGS10': '10Y Yield β',
-                    'beta_FEDFUNDS': 'Fed Funds β',
-                    'beta_UNRATE': 'Unemployment β',
-                    'beta_HY_Spread': 'Credit Spread β',
-                    'R_squared': 'R²',
-                    'n_observations': '# Months'
-                }
-                display_df = display_df.rename(columns=column_rename)
-                
-                st.dataframe(
-                    display_df,
-                    use_container_width=True,
-                    hide_index=True
-                )
-                
-                # ================== DETAILED RESULTS ==================
-                with st.expander("📋 Detailed Stress Results"):
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # ================== BETAS TABLE ==================
+                    st.subheader("📈 Factor Betas by Stock")
+                    st.caption("These coefficients show each stock's sensitivity to macro factors")
+                    
+                    # Format betas table
+                    display_df = model_summary(betas_df).copy()
+                    
+                    # Rename columns for display
+                    column_rename = {
+                        'ticker': 'Ticker',
+                        'beta_SPY': 'Market β',
+                        'beta_DGS10': '10Y Yield β',
+                        'beta_FEDFUNDS': 'Fed Funds β',
+                        'beta_UNRATE': 'Unemployment β',
+                        'beta_HY_Spread': 'Credit Spread β',
+                        'R_squared': 'R²',
+                        'n_observations': '# Months'
+                    }
+                    display_df = display_df.rename(columns=column_rename)
+                    
                     st.dataframe(
-                        stress_results.round(4),
+                        display_df,
                         use_container_width=True,
                         hide_index=True
                     )
-                
-                st.success("✅ Stress test completed successfully!")
-                
-            except Exception as e:
-                st.error(f"❌ Error during analysis: {str(e)}")
-                st.exception(e)
+                    
+                    # ================== DETAILED RESULTS ==================
+                    with st.expander("📋 Detailed Stress Results"):
+                        st.dataframe(
+                            stress_results.round(4),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                    
+                    st.success("✅ Stress test completed successfully!")
+                    
+                except Exception as e:
+                    st.error(f"❌ Error during analysis: {str(e)}")
+                    st.exception(e)
 
 else:
     # Show instructions when not running
